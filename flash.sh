@@ -6,7 +6,7 @@
 # Designed for macOS. Uses diskutil for disk management and avoids
 # mounting the ext4 root partition (not natively supported on macOS).
 #
-# Usage: sudo ./flash.sh [--image /path/to/image] [--dry-run] [--help]
+# Usage: sudo ./flash.sh [OPTIONS]
 #
 set -euo pipefail
 
@@ -18,6 +18,14 @@ BOOT_MOUNT=""
 TARGET_DEV=""
 IMAGE_ARG=""
 DRY_RUN=false
+WIFI_SSID=""
+WIFI_PASS=""
+LATITUDE=""
+LONGITUDE=""
+PI_HOSTNAME=""
+USERNAME=""
+USER_PASS=""
+SKIP_CONFIRM=false
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -39,14 +47,23 @@ Flight Tracker SD Flasher (macOS)
 Usage: sudo ./flash.sh [OPTIONS]
 
 Options:
-  --image PATH    Use a local image file instead of downloading
-                  Supports: .img, .img.xz, .img.gz, .zip
-  --dry-run       Run through prompts and disk detection without
-                  flashing or modifying anything (no sudo required)
-  --help          Show this help message
+  --image PATH         Use a local image file instead of downloading
+                       Supports: .img, .img.xz, .img.gz, .zip
+  --dry-run            Run through prompts and disk detection without
+                       flashing or modifying anything (no sudo required)
+  --ssid SSID          WiFi network name
+  --wifi-password PASS WiFi password
+  --lat VALUE          Latitude in decimal degrees
+  --lon VALUE          Longitude in decimal degrees
+  --hostname NAME      Pi hostname (default: flight-tracker)
+  --username NAME      Pi username (default: pi)
+  --password PASS      Pi user password
+  --device PATH        Target device (e.g. /dev/disk4)
+  --yes, -y            Skip the erase confirmation prompt
+  --help, -h           Show this help message
 
-The tool will prompt for WiFi credentials, GPS coordinates, and target
-SD card device interactively.
+When all required values are provided via flags, the script runs fully
+non-interactively. Missing values will be prompted for interactively.
 EOF
     exit 0
 }
@@ -96,6 +113,32 @@ while [[ $# -gt 0 ]]; do
             IMAGE_ARG="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=true; shift ;;
+        --ssid)
+            [[ -z "${2:-}" ]] && die "--ssid requires a value"
+            WIFI_SSID="$2"; shift 2 ;;
+        --wifi-password)
+            [[ -z "${2:-}" ]] && die "--wifi-password requires a value"
+            WIFI_PASS="$2"; shift 2 ;;
+        --lat)
+            [[ -z "${2:-}" ]] && die "--lat requires a value"
+            LATITUDE="$2"; shift 2 ;;
+        --lon)
+            [[ -z "${2:-}" ]] && die "--lon requires a value"
+            LONGITUDE="$2"; shift 2 ;;
+        --hostname)
+            [[ -z "${2:-}" ]] && die "--hostname requires a value"
+            PI_HOSTNAME="$2"; shift 2 ;;
+        --username)
+            [[ -z "${2:-}" ]] && die "--username requires a value"
+            USERNAME="$2"; shift 2 ;;
+        --password)
+            [[ -z "${2:-}" ]] && die "--password requires a value"
+            USER_PASS="$2"; shift 2 ;;
+        --device)
+            [[ -z "${2:-}" ]] && die "--device requires a value"
+            TARGET_DEV="$2"; shift 2 ;;
+        --yes|-y)
+            SKIP_CONFIRM=true; shift ;;
         --help|-h)
             usage ;;
         *)
@@ -123,13 +166,15 @@ fi
 echo "Flight Tracker SD Flasher"
 echo "─────────────────────────"
 
-prompt       WIFI_SSID     "WiFi SSID"
-prompt_secret WIFI_PASS    "WiFi password"
-prompt       LATITUDE      "Latitude (decimal degrees)"
-prompt       LONGITUDE     "Longitude (decimal degrees)"
-prompt       PI_HOSTNAME   "Hostname"       "flight-tracker"
-prompt       USERNAME      "Username"        "pi"
-prompt_secret USER_PASS    "Password"
+[[ -z "$WIFI_SSID" ]]    && prompt       WIFI_SSID     "WiFi SSID"
+[[ -z "$WIFI_PASS" ]]    && prompt_secret WIFI_PASS     "WiFi password"
+[[ -z "$LATITUDE" ]]     && prompt       LATITUDE      "Latitude (decimal degrees)"
+[[ -z "$LONGITUDE" ]]    && prompt       LONGITUDE     "Longitude (decimal degrees)"
+[[ -z "$PI_HOSTNAME" ]]  && prompt       PI_HOSTNAME   "Hostname"       "flight-tracker"
+[[ -z "$PI_HOSTNAME" ]]  && PI_HOSTNAME="flight-tracker"
+[[ -z "$USERNAME" ]]     && prompt       USERNAME      "Username"        "pi"
+[[ -z "$USERNAME" ]]     && USERNAME="pi"
+[[ -z "$USER_PASS" ]]    && prompt_secret USER_PASS     "Password"
 
 echo ""
 
@@ -150,44 +195,64 @@ validate_coord "$LONGITUDE" "Longitude" -180 180
 
 # ── Device selection ─────────────────────────────────────────────────────────
 
-echo "Available disks:"
-
-DISK_LIST=()
-while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    # diskutil list external prints lines like: /dev/disk4 (external, physical):
-    if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
-        dev="${BASH_REMATCH[1]}"
-        # Get size from diskutil info
-        size=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Disk Size/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
-        name=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Media Name/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
-        DISK_LIST+=("$dev")
-        printf "  %-14s %-24s %s\n" "$dev" "${size:-unknown}" "${name:-}"
+if [[ -n "$TARGET_DEV" ]]; then
+    # Validate that the provided device is an external disk
+    if ! $DRY_RUN; then
+        DISK_LIST=()
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
+                DISK_LIST+=("${BASH_REMATCH[1]}")
+            fi
+        done < <(diskutil list external 2>/dev/null)
+        found=false
+        for d in "${DISK_LIST[@]+"${DISK_LIST[@]}"}"; do
+            [[ "$d" == "$TARGET_DEV" ]] && found=true && break
+        done
+        $found || die "$TARGET_DEV is not in the list of external disks"
     fi
-done < <(diskutil list external 2>/dev/null)
+else
+    echo "Available disks:"
 
-if [[ ${#DISK_LIST[@]} -eq 0 ]]; then
-    die "No external disks found. Insert an SD card and try again."
+    DISK_LIST=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # diskutil list external prints lines like: /dev/disk4 (external, physical):
+        if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
+            dev="${BASH_REMATCH[1]}"
+            # Get size from diskutil info
+            size=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Disk Size/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+            name=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Media Name/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+            DISK_LIST+=("$dev")
+            printf "  %-14s %-24s %s\n" "$dev" "${size:-unknown}" "${name:-}"
+        fi
+    done < <(diskutil list external 2>/dev/null)
+
+    if [[ ${#DISK_LIST[@]} -eq 0 ]]; then
+        die "No external disks found. Insert an SD card and try again."
+    fi
+
+    echo ""
+    DEFAULT_DEV="${DISK_LIST[0]}"
+    prompt TARGET_DEV "Target device" "$DEFAULT_DEV"
+
+    # Verify the selected device is in our list
+    found=false
+    for d in "${DISK_LIST[@]+"${DISK_LIST[@]}"}"; do
+        [[ "$d" == "$TARGET_DEV" ]] && found=true && break
+    done
+    $found || die "$TARGET_DEV is not in the list of external disks"
 fi
-
-echo ""
-DEFAULT_DEV="${DISK_LIST[0]}"
-prompt TARGET_DEV "Target device" "$DEFAULT_DEV"
-
-# Verify the selected device is in our list
-found=false
-for d in "${DISK_LIST[@]}"; do
-    [[ "$d" == "$TARGET_DEV" ]] && found=true && break
-done
-$found || die "$TARGET_DEV is not in the list of external disks"
 
 # Use raw device for faster dd
 RAW_DEV="${TARGET_DEV/disk/rdisk}"
 
 echo ""
-echo "WARNING: ALL DATA on $TARGET_DEV will be erased!"
-read -rp "Continue? [y/N]: " confirm
-[[ "$confirm" == "y" || "$confirm" == "Y" ]] || { echo "Aborted."; exit 1; }
+if ! $SKIP_CONFIRM; then
+    echo "WARNING: ALL DATA on $TARGET_DEV will be erased!"
+    read -rp "Continue? [y/N]: " confirm
+    [[ "$confirm" == "y" || "$confirm" == "Y" ]] || { echo "Aborted."; exit 1; }
+fi
 
 echo ""
 
