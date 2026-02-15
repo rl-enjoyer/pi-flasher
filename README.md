@@ -4,8 +4,8 @@ Flash a micro SD card with Raspberry Pi OS Lite (Bookworm) pre-configured for th
 
 ## Requirements
 
-- Linux host with `dd`, `mount`, `lsblk`, `openssl`, `curl` (or `wget`)
-- `xz-utils` (for `.img.xz` decompression)
+- macOS with `diskutil`, `dd`, `openssl`, `curl` (or `wget`)
+- `xz` (for `.img.xz` decompression — `brew install xz`)
 - Root privileges (`sudo`)
 
 ## Usage
@@ -25,7 +25,7 @@ The script will prompt for:
 | Hostname | Defaults to `flight-tracker` |
 | Username | Defaults to `pi` |
 | Password | Password for the Pi user account |
-| Target device | The SD card block device (e.g. `/dev/sdb`) |
+| Target device | The SD card disk (e.g. `/dev/disk4`) |
 
 ### Options
 
@@ -48,9 +48,8 @@ sudo ./flash.sh --image ~/Downloads/2024-11-19-raspios-bookworm-armhf-lite.img.x
 ## What it does
 
 1. **Downloads** Raspberry Pi OS Lite (32-bit, armhf) — cached in `~/.cache/flight-tracker-flasher/`
-2. **Flashes** the image to the SD card using `dd`
-3. **Configures the boot partition**: enables SSH, sets up user credentials, creates a first-run script
-4. **Configures the root filesystem**: writes WiFi credentials for NetworkManager
+2. **Flashes** the image to the SD card using `dd` (via raw device `/dev/rdiskN` for speed)
+3. **Configures the boot partition**: enables SSH, sets up user credentials, creates a first-run script that configures WiFi on first boot
 
 ## Boot sequence
 
