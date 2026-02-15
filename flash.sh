@@ -3,6 +3,9 @@
 # flight-tracker-flasher — Flash an SD card with Raspberry Pi OS Lite
 # pre-configured for the flight-tracker-led project.
 #
+# Designed for macOS. Uses diskutil for disk management and avoids
+# mounting the ext4 root partition (not natively supported on macOS).
+#
 # Usage: sudo ./flash.sh [--image /path/to/image] [--help]
 #
 set -euo pipefail
@@ -11,16 +14,17 @@ set -euo pipefail
 
 IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-2024-11-19/2024-11-19-raspios-bookworm-armhf-lite.img.xz"
 CACHE_DIR="${HOME}/.cache/flight-tracker-flasher"
-MOUNT_BOOT=""
-MOUNT_ROOT=""
+BOOT_MOUNT=""
+TARGET_DEV=""
 IMAGE_ARG=""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 cleanup() {
     set +e
-    [[ -n "$MOUNT_BOOT" && -d "$MOUNT_BOOT" ]] && umount "$MOUNT_BOOT" 2>/dev/null && rmdir "$MOUNT_BOOT" 2>/dev/null
-    [[ -n "$MOUNT_ROOT" && -d "$MOUNT_ROOT" ]] && umount "$MOUNT_ROOT" 2>/dev/null && rmdir "$MOUNT_ROOT" 2>/dev/null
+    if [[ -n "$BOOT_MOUNT" ]]; then
+        diskutil unmount "$BOOT_MOUNT" 2>/dev/null
+    fi
     set -e
 }
 trap cleanup EXIT
@@ -29,7 +33,7 @@ die() { echo "Error: $*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Flight Tracker SD Flasher
+Flight Tracker SD Flasher (macOS)
 
 Usage: sudo ./flash.sh [OPTIONS]
 
@@ -70,6 +74,16 @@ prompt_secret() {
     printf -v "$var" '%s' "$value"
 }
 
+# Hash a password using SHA-512 crypt format.
+# macOS LibreSSL may not support `openssl passwd -6`, so fall back to Python.
+hash_password() {
+    local pass="$1"
+    local hash
+    hash=$(openssl passwd -6 "$pass" 2>/dev/null) && { echo "$hash"; return; }
+    hash=$(python3 -c "import crypt; print(crypt.crypt('$pass', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null) && { echo "$hash"; return; }
+    die "Cannot hash password: neither 'openssl passwd -6' nor Python crypt module available"
+}
+
 # ── Parse args ───────────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
@@ -87,8 +101,9 @@ done
 # ── Preflight checks ────────────────────────────────────────────────────────
 
 [[ $EUID -ne 0 ]] && die "This script must be run as root (sudo)."
+[[ "$(uname)" == "Darwin" ]] || die "This script is designed for macOS."
 
-for cmd in dd mount umount lsblk openssl mktemp; do
+for cmd in dd diskutil openssl mktemp; do
     command -v "$cmd" &>/dev/null || die "Required command not found: $cmd"
 done
 
@@ -105,7 +120,7 @@ prompt       WIFI_SSID     "WiFi SSID"
 prompt_secret WIFI_PASS    "WiFi password"
 prompt       LATITUDE      "Latitude (decimal degrees)"
 prompt       LONGITUDE     "Longitude (decimal degrees)"
-prompt       HOSTNAME      "Hostname"       "flight-tracker"
+prompt       PI_HOSTNAME   "Hostname"       "flight-tracker"
 prompt       USERNAME      "Username"        "pi"
 prompt_secret USER_PASS    "Password"
 
@@ -130,37 +145,37 @@ validate_coord "$LONGITUDE" "Longitude" -180 180
 
 echo "Available disks:"
 
-# Get root device to exclude it
-ROOT_DEV=$(lsblk -npo PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || true)
-[[ -z "$ROOT_DEV" ]] && ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/[0-9]*$//' 2>/dev/null || true)
-
 DISK_LIST=()
 while IFS= read -r line; do
-    dev=$(echo "$line" | awk '{print $1}')
-    # Skip the root device
-    [[ "$dev" == "$ROOT_DEV" ]] && continue
-    size=$(echo "$line" | awk '{print $2}')
-    model=$(echo "$line" | awk '{$1=""; $2=""; $NF=""; print}' | xargs)
-    DISK_LIST+=("$dev")
-    printf "  %-12s %-8s %s\n" "$dev" "$size" "$model"
-done < <(lsblk -dpno NAME,SIZE,MODEL,TRAN 2>/dev/null | grep -E 'usb|mmc' || true)
+    [[ -z "$line" ]] && continue
+    # diskutil list external prints lines like: /dev/disk4 (external, physical):
+    if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
+        dev="${BASH_REMATCH[1]}"
+        # Get size from diskutil info
+        size=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Disk Size/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+        name=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Media Name/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+        DISK_LIST+=("$dev")
+        printf "  %-14s %-24s %s\n" "$dev" "${size:-unknown}" "${name:-}"
+    fi
+done < <(diskutil list external 2>/dev/null)
 
 if [[ ${#DISK_LIST[@]} -eq 0 ]]; then
-    die "No removable disks found. Insert an SD card and try again."
+    die "No external disks found. Insert an SD card and try again."
 fi
 
 echo ""
 DEFAULT_DEV="${DISK_LIST[0]}"
 prompt TARGET_DEV "Target device" "$DEFAULT_DEV"
 
-# Verify the selected device exists and is in our list
-[[ -b "$TARGET_DEV" ]] || die "$TARGET_DEV is not a valid block device"
-
+# Verify the selected device is in our list
 found=false
 for d in "${DISK_LIST[@]}"; do
     [[ "$d" == "$TARGET_DEV" ]] && found=true && break
 done
-$found || die "$TARGET_DEV is not in the list of removable disks"
+$found || die "$TARGET_DEV is not in the list of external disks"
+
+# Use raw device for faster dd
+RAW_DEV="${TARGET_DEV/disk/rdisk}"
 
 echo ""
 echo "WARNING: ALL DATA on $TARGET_DEV will be erased!"
@@ -171,7 +186,7 @@ echo ""
 
 # ── Step 1: Get the image ───────────────────────────────────────────────────
 
-echo "[1/4] Downloading Raspberry Pi OS Lite (Bookworm)..."
+echo "[1/3] Downloading Raspberry Pi OS Lite (Bookworm)..."
 
 if [[ -n "$IMAGE_ARG" ]]; then
     [[ -f "$IMAGE_ARG" ]] || die "Image file not found: $IMAGE_ARG"
@@ -196,7 +211,7 @@ fi
 # Determine decompression command based on extension
 case "$IMAGE_FILE" in
     *.img.xz)
-        command -v xzcat &>/dev/null || die "xzcat is required for .xz images (install xz-utils)"
+        command -v xzcat &>/dev/null || die "xzcat is required for .xz images (brew install xz)"
         DECOMPRESS="xzcat"
         ;;
     *.img.gz)
@@ -205,7 +220,6 @@ case "$IMAGE_FILE" in
         ;;
     *.zip)
         command -v unzip &>/dev/null || die "unzip is required for .zip images"
-        # Extract the .img filename from the zip
         IMG_NAME=$(unzip -l "$IMAGE_FILE" | grep '\.img$' | awk '{print $NF}' | head -1)
         [[ -n "$IMG_NAME" ]] || die "No .img file found inside zip"
         DECOMPRESS="unzip -p"
@@ -220,79 +234,84 @@ esac
 
 # ── Step 2: Flash ────────────────────────────────────────────────────────────
 
-echo "[2/4] Flashing to $TARGET_DEV..."
+echo "[2/3] Flashing to $TARGET_DEV (raw: $RAW_DEV)..."
 
-# Unmount any existing partitions on the target
-for part in "${TARGET_DEV}"*; do
-    mountpoint -q "$part" 2>/dev/null && umount "$part" 2>/dev/null || true
-done
+# Unmount all volumes on the target disk
+diskutil unmountDisk "$TARGET_DEV" 2>/dev/null || true
 
-$DECOMPRESS "$IMAGE_FILE" | dd of="$TARGET_DEV" bs=4M oflag=sync status=progress 2>&1
+$DECOMPRESS "$IMAGE_FILE" | dd of="$RAW_DEV" bs=1m 2>&1
 
 sync
 echo "  Flash complete."
 
-# Re-read partition table
-partprobe "$TARGET_DEV" 2>/dev/null || true
+# Give macOS time to recognize the new partition table
+sleep 3
+
+# Mount the disk so we can access the boot partition
+diskutil mountDisk "$TARGET_DEV" 2>/dev/null || true
 sleep 2
 
-# ── Determine partition names ────────────────────────────────────────────────
+# ── Find the boot partition mount point ──────────────────────────────────────
 
-# Handle both /dev/sdX1 and /dev/mmcblkXp1 naming schemes
-if [[ "$TARGET_DEV" =~ [0-9]$ ]]; then
-    PART1="${TARGET_DEV}p1"
-    PART2="${TARGET_DEV}p2"
-else
-    PART1="${TARGET_DEV}1"
-    PART2="${TARGET_DEV}2"
+# The FAT32 boot partition is partition 1 (e.g., /dev/disk4s1)
+PART1="${TARGET_DEV}s1"
+
+# Find where it got mounted
+BOOT_MOUNT=$(diskutil info "$PART1" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
+
+if [[ -z "$BOOT_MOUNT" || "$BOOT_MOUNT" == "" ]]; then
+    # Try mounting it explicitly
+    diskutil mount "$PART1" 2>/dev/null || true
+    sleep 1
+    BOOT_MOUNT=$(diskutil info "$PART1" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
 fi
 
-[[ -b "$PART1" ]] || die "Boot partition $PART1 not found"
-[[ -b "$PART2" ]] || die "Root partition $PART2 not found"
+[[ -d "$BOOT_MOUNT" ]] || die "Could not find boot partition mount point for $PART1"
+echo "  Boot partition mounted at: $BOOT_MOUNT"
 
 # ── Step 3: Configure boot partition ─────────────────────────────────────────
 
-echo "[3/4] Configuring boot partition..."
-
-MOUNT_BOOT=$(mktemp -d /tmp/ftf-boot.XXXXXX)
-mount "$PART1" "$MOUNT_BOOT"
+echo "[3/3] Configuring boot partition..."
 
 # Enable SSH
-touch "$MOUNT_BOOT/ssh"
+touch "$BOOT_MOUNT/ssh"
 
 # Create userconf.txt with hashed password
-PASS_HASH=$(openssl passwd -6 "$USER_PASS")
-echo "${USERNAME}:${PASS_HASH}" > "$MOUNT_BOOT/userconf.txt"
+PASS_HASH=$(hash_password "$USER_PASS")
+echo "${USERNAME}:${PASS_HASH}" > "$BOOT_MOUNT/userconf.txt"
 
 # Detect timezone from host
-HOST_TZ=$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo "UTC")
+HOST_TZ=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo "UTC")
 
 # Disable onboard audio in config.txt
-if [[ -f "$MOUNT_BOOT/config.txt" ]]; then
-    if grep -q '^dtparam=audio=on' "$MOUNT_BOOT/config.txt"; then
-        sed -i 's/^dtparam=audio=on/dtparam=audio=off/' "$MOUNT_BOOT/config.txt"
-    elif ! grep -q '^dtparam=audio=' "$MOUNT_BOOT/config.txt"; then
-        echo "dtparam=audio=off" >> "$MOUNT_BOOT/config.txt"
+if [[ -f "$BOOT_MOUNT/config.txt" ]]; then
+    if grep -q '^dtparam=audio=on' "$BOOT_MOUNT/config.txt"; then
+        sed -i '' 's/^dtparam=audio=on/dtparam=audio=off/' "$BOOT_MOUNT/config.txt"
+    elif ! grep -q '^dtparam=audio=' "$BOOT_MOUNT/config.txt"; then
+        echo "dtparam=audio=off" >> "$BOOT_MOUNT/config.txt"
     fi
 fi
 
-# Create firstrun.sh
-cat > "$MOUNT_BOOT/firstrun.sh" <<'FIRSTRUN_OUTER'
+# Create firstrun.sh — variables section (expanded now)
+cat > "$BOOT_MOUNT/firstrun.sh" <<'FIRSTRUN_OUTER'
 #!/bin/bash
 set -e
 
-# ── Set hostname ─────────────────────────────────────────────────────────────
 FIRSTRUN_OUTER
 
-cat >> "$MOUNT_BOOT/firstrun.sh" <<FIRSTRUN_VARS
-CONF_HOSTNAME="${HOSTNAME}"
+cat >> "$BOOT_MOUNT/firstrun.sh" <<FIRSTRUN_VARS
+CONF_HOSTNAME="${PI_HOSTNAME}"
 CONF_TIMEZONE="${HOST_TZ}"
 CONF_LATITUDE="${LATITUDE}"
 CONF_LONGITUDE="${LONGITUDE}"
+CONF_WIFI_SSID="${WIFI_SSID}"
+CONF_WIFI_PASS="${WIFI_PASS}"
 FIRSTRUN_VARS
 
-cat >> "$MOUNT_BOOT/firstrun.sh" <<'FIRSTRUN_BODY'
+# Create firstrun.sh — body section (literal, no expansion)
+cat >> "$BOOT_MOUNT/firstrun.sh" <<'FIRSTRUN_BODY'
 
+# ── Set hostname ─────────────────────────────────────────────────────────────
 echo "$CONF_HOSTNAME" > /etc/hostname
 sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$CONF_HOSTNAME/" /etc/hosts
 
@@ -302,6 +321,33 @@ echo "$CONF_TIMEZONE" > /etc/timezone
 
 # ── Unblock WiFi ─────────────────────────────────────────────────────────────
 rfkill unblock wifi 2>/dev/null || true
+
+# ── Configure WiFi via NetworkManager ────────────────────────────────────────
+NM_DIR="/etc/NetworkManager/system-connections"
+mkdir -p "$NM_DIR"
+
+cat > "$NM_DIR/wifi.nmconnection" <<NMEOF
+[connection]
+id=${CONF_WIFI_SSID}
+type=wifi
+autoconnect=true
+
+[wifi]
+mode=infrastructure
+ssid=${CONF_WIFI_SSID}
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=${CONF_WIFI_PASS}
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+NMEOF
+
+chmod 600 "$NM_DIR/wifi.nmconnection"
 
 # ── Create the second-stage setup script ─────────────────────────────────────
 cat > /opt/flight-tracker-setup.sh <<'SETUP_EOF'
@@ -413,10 +459,10 @@ fi
 
 FIRSTRUN_BODY
 
-chmod +x "$MOUNT_BOOT/firstrun.sh"
+chmod +x "$BOOT_MOUNT/firstrun.sh"
 
 # Append firstrun trigger to cmdline.txt
-CMDLINE_FILE="$MOUNT_BOOT/cmdline.txt"
+CMDLINE_FILE="$BOOT_MOUNT/cmdline.txt"
 if [[ -f "$CMDLINE_FILE" ]]; then
     # Remove trailing newline, append on same line
     EXISTING=$(tr -d '\n' < "$CMDLINE_FILE")
@@ -425,56 +471,14 @@ else
     die "cmdline.txt not found on boot partition"
 fi
 
-umount "$MOUNT_BOOT"
-echo "  Boot partition configured."
-
-# ── Step 4: Configure root filesystem ────────────────────────────────────────
-
-echo "[4/4] Configuring root filesystem..."
-
-MOUNT_ROOT=$(mktemp -d /tmp/ftf-root.XXXXXX)
-mount "$PART2" "$MOUNT_ROOT"
-
-# Create NetworkManager connection for WiFi
-NM_DIR="$MOUNT_ROOT/etc/NetworkManager/system-connections"
-mkdir -p "$NM_DIR"
-
-cat > "$NM_DIR/wifi.nmconnection" <<NMEOF
-[connection]
-id=${WIFI_SSID}
-type=wifi
-autoconnect=true
-
-[wifi]
-mode=infrastructure
-ssid=${WIFI_SSID}
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=${WIFI_PASS}
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=auto
-NMEOF
-
-chmod 600 "$NM_DIR/wifi.nmconnection"
-chown root:root "$NM_DIR/wifi.nmconnection"
-
-umount "$MOUNT_ROOT"
-echo "  Root filesystem configured."
-
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 sync
-
-# Clear mount vars so trap doesn't try to unmount again
-MOUNT_BOOT=""
-MOUNT_ROOT=""
+diskutil unmount "$BOOT_MOUNT" 2>/dev/null || true
+BOOT_MOUNT=""
+diskutil eject "$TARGET_DEV" 2>/dev/null || true
 
 echo ""
 echo "Done! Insert the SD card into your Pi and power on."
 echo "The flight tracker will start automatically after first boot."
-echo "SSH: ssh ${USERNAME}@${HOSTNAME}.local"
+echo "SSH: ssh ${USERNAME}@${PI_HOSTNAME}.local"
