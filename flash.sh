@@ -6,7 +6,7 @@
 # Designed for macOS. Uses diskutil for disk management and avoids
 # mounting the ext4 root partition (not natively supported on macOS).
 #
-# Usage: sudo ./flash.sh [--image /path/to/image] [--help]
+# Usage: sudo ./flash.sh [--image /path/to/image] [--dry-run] [--help]
 #
 set -euo pipefail
 
@@ -17,12 +17,13 @@ CACHE_DIR="${HOME}/.cache/flight-tracker-flasher"
 BOOT_MOUNT=""
 TARGET_DEV=""
 IMAGE_ARG=""
+DRY_RUN=false
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 cleanup() {
     set +e
-    if [[ -n "$BOOT_MOUNT" ]]; then
+    if [[ -n "$BOOT_MOUNT" ]] && ! $DRY_RUN; then
         diskutil unmount "$BOOT_MOUNT" 2>/dev/null
     fi
     set -e
@@ -40,6 +41,8 @@ Usage: sudo ./flash.sh [OPTIONS]
 Options:
   --image PATH    Use a local image file instead of downloading
                   Supports: .img, .img.xz, .img.gz, .zip
+  --dry-run       Run through prompts and disk detection without
+                  flashing or modifying anything (no sudo required)
   --help          Show this help message
 
 The tool will prompt for WiFi credentials, GPS coordinates, and target
@@ -91,6 +94,8 @@ while [[ $# -gt 0 ]]; do
         --image)
             [[ -z "${2:-}" ]] && die "--image requires a path argument"
             IMAGE_ARG="$2"; shift 2 ;;
+        --dry-run)
+            DRY_RUN=true; shift ;;
         --help|-h)
             usage ;;
         *)
@@ -100,7 +105,9 @@ done
 
 # ── Preflight checks ────────────────────────────────────────────────────────
 
-[[ $EUID -ne 0 ]] && die "This script must be run as root (sudo)."
+if ! $DRY_RUN; then
+    [[ $EUID -ne 0 ]] && die "This script must be run as root (sudo)."
+fi
 [[ "$(uname)" == "Darwin" ]] || die "This script is designed for macOS."
 
 for cmd in dd diskutil openssl mktemp; do
@@ -180,7 +187,7 @@ RAW_DEV="${TARGET_DEV/disk/rdisk}"
 echo ""
 echo "WARNING: ALL DATA on $TARGET_DEV will be erased!"
 read -rp "Continue? [y/N]: " confirm
-[[ "${confirm,,}" == "y" ]] || { echo "Aborted."; exit 1; }
+[[ "$confirm" == "y" || "$confirm" == "Y" ]] || { echo "Aborted."; exit 1; }
 
 echo ""
 
@@ -236,42 +243,67 @@ esac
 
 echo "[2/3] Flashing to $TARGET_DEV (raw: $RAW_DEV)..."
 
-# Unmount all volumes on the target disk
-diskutil unmountDisk "$TARGET_DEV" 2>/dev/null || true
+if $DRY_RUN; then
+    echo "  [dry-run] Would run: diskutil unmountDisk $TARGET_DEV"
+    echo "  [dry-run] Would run: $DECOMPRESS $IMAGE_FILE | dd of=$RAW_DEV bs=1m"
+    echo "  [dry-run] Skipping flash."
+    BOOT_MOUNT="/Volumes/bootfs (dry-run)"
+    echo "  [dry-run] Boot partition would be mounted (skipping)"
+else
+    # Unmount all volumes on the target disk
+    diskutil unmountDisk "$TARGET_DEV" 2>/dev/null || true
 
-$DECOMPRESS "$IMAGE_FILE" | dd of="$RAW_DEV" bs=1m 2>&1
+    $DECOMPRESS "$IMAGE_FILE" | dd of="$RAW_DEV" bs=1m 2>&1
 
-sync
-echo "  Flash complete."
+    sync
+    echo "  Flash complete."
 
-# Give macOS time to recognize the new partition table
-sleep 3
+    # Give macOS time to recognize the new partition table
+    sleep 3
 
-# Mount the disk so we can access the boot partition
-diskutil mountDisk "$TARGET_DEV" 2>/dev/null || true
-sleep 2
+    # Mount the disk so we can access the boot partition
+    diskutil mountDisk "$TARGET_DEV" 2>/dev/null || true
+    sleep 2
 
-# ── Find the boot partition mount point ──────────────────────────────────────
+    # ── Find the boot partition mount point ──────────────────────────────────
+    PART1="${TARGET_DEV}s1"
 
-# The FAT32 boot partition is partition 1 (e.g., /dev/disk4s1)
-PART1="${TARGET_DEV}s1"
-
-# Find where it got mounted
-BOOT_MOUNT=$(diskutil info "$PART1" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
-
-if [[ -z "$BOOT_MOUNT" || "$BOOT_MOUNT" == "" ]]; then
-    # Try mounting it explicitly
-    diskutil mount "$PART1" 2>/dev/null || true
-    sleep 1
     BOOT_MOUNT=$(diskutil info "$PART1" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
-fi
 
-[[ -d "$BOOT_MOUNT" ]] || die "Could not find boot partition mount point for $PART1"
-echo "  Boot partition mounted at: $BOOT_MOUNT"
+    if [[ -z "$BOOT_MOUNT" || "$BOOT_MOUNT" == "" ]]; then
+        diskutil mount "$PART1" 2>/dev/null || true
+        sleep 1
+        BOOT_MOUNT=$(diskutil info "$PART1" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
+    fi
+
+    [[ -d "$BOOT_MOUNT" ]] || die "Could not find boot partition mount point for $PART1"
+    echo "  Boot partition mounted at: $BOOT_MOUNT"
+fi
 
 # ── Step 3: Configure boot partition ─────────────────────────────────────────
 
 echo "[3/3] Configuring boot partition..."
+
+if $DRY_RUN; then
+    PASS_HASH=$(hash_password "$USER_PASS")
+    HOST_TZ=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo "UTC")
+    echo "  [dry-run] Would write: $BOOT_MOUNT/ssh (enable SSH)"
+    echo "  [dry-run] Would write: $BOOT_MOUNT/userconf.txt (${USERNAME}:<hash>)"
+    echo "  [dry-run] Would modify: $BOOT_MOUNT/config.txt (disable onboard audio)"
+    echo "  [dry-run] Would write: $BOOT_MOUNT/firstrun.sh (first-boot setup script)"
+    echo "  [dry-run]   Hostname: $PI_HOSTNAME"
+    echo "  [dry-run]   Timezone: $HOST_TZ"
+    echo "  [dry-run]   WiFi SSID: $WIFI_SSID"
+    echo "  [dry-run]   Latitude: $LATITUDE"
+    echo "  [dry-run]   Longitude: $LONGITUDE"
+    echo "  [dry-run] Would modify: $BOOT_MOUNT/cmdline.txt (add firstrun trigger)"
+    echo ""
+    echo "  [dry-run] Would run: diskutil unmount $BOOT_MOUNT"
+    echo "  [dry-run] Would run: diskutil eject $TARGET_DEV"
+    echo ""
+    echo "Done! (dry run — no changes were made)"
+    exit 0
+fi
 
 # Enable SSH
 touch "$BOOT_MOUNT/ssh"
