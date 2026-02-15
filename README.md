@@ -30,19 +30,41 @@ The script will prompt for:
 ### Options
 
 ```
---image PATH    Use a local OS image instead of downloading
-                Supports: .img, .img.xz, .img.gz, .zip
---help          Show help message
+--image PATH         Use a local OS image instead of downloading
+                     Supports: .img, .img.xz, .img.gz, .zip
+--dry-run            Run through prompts without flashing (no sudo required)
+--ssid SSID          WiFi network name
+--wifi-password PASS WiFi password
+--lat VALUE          Latitude in decimal degrees
+--lon VALUE          Longitude in decimal degrees
+--hostname NAME      Pi hostname (default: flight-tracker)
+--username NAME      Pi username (default: pi)
+--password PASS      Pi user password
+--device PATH        Target device (e.g. /dev/disk4)
+--yes, -y            Skip the erase confirmation prompt
+--help, -h           Show help message
 ```
+
+All flags are optional. Missing values will be prompted for interactively.
 
 ### Examples
 
 ```bash
-# Download and flash (image is cached for future runs)
+# Interactive — prompts for everything
 sudo ./flash.sh
+
+# Fully non-interactive
+sudo ./flash.sh --ssid MyWifi --wifi-password secret \
+  --lat 39.5 --lon -76.4 --password pass123 \
+  --device /dev/disk4 --yes
 
 # Use a local image file
 sudo ./flash.sh --image ~/Downloads/2024-11-19-raspios-bookworm-armhf-lite.img.xz
+
+# Dry run — test without flashing
+./flash.sh --dry-run --ssid MyWifi --wifi-password secret \
+  --lat 39.5 --lon -76.4 --password pass123 \
+  --device /dev/disk4 --yes
 ```
 
 ## What it does
