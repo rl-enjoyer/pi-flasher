@@ -195,42 +195,58 @@ validate_coord "$LONGITUDE" "Longitude" -180 180
 
 # ── Device selection ─────────────────────────────────────────────────────────
 
+# Build list of candidate disks (physical disks that aren't the boot volume)
+# Uses both external disks and non-boot internal disks (for built-in SD readers)
+# Identify the boot disk and its physical store so we never offer them as targets
+BOOT_DISK=$(diskutil info / 2>/dev/null | awk -F: '/Part of Whole/{gsub(/^[ \t]+/,"",$2); print "/dev/"$2}')
+BOOT_PHYS=$(diskutil list 2>/dev/null | awk -v bd="${BOOT_DISK#/dev/}" '
+    /^\/dev\/disk[0-9]+/ { cur=$1 }
+    /Apple_APFS.*Container/ && index($0, "Container " bd) > 0 { print cur }
+' | head -1)
+
+build_disk_list() {
+    DISK_LIST=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
+            local dev="${BASH_REMATCH[1]}"
+            [[ "$dev" == "$BOOT_DISK" ]] && continue
+            [[ -n "$BOOT_PHYS" && "$dev" == "$BOOT_PHYS" ]] && continue
+            # Skip synthesized/virtual disks
+            local dtype
+            dtype=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Virtual/{gsub(/^[ \t]+/,"",$2); print $2}')
+            [[ "$dtype" == "Yes" ]] && continue
+            DISK_LIST+=("$dev")
+        fi
+    done < <(diskutil list 2>/dev/null)
+}
+
 if [[ -n "$TARGET_DEV" ]]; then
-    # Validate that the provided device is an external disk
+    # Validate that the provided device is not the boot disk
     if ! $DRY_RUN; then
-        DISK_LIST=()
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
-                DISK_LIST+=("${BASH_REMATCH[1]}")
-            fi
-        done < <(diskutil list external 2>/dev/null)
+        build_disk_list
         found=false
         for d in "${DISK_LIST[@]+"${DISK_LIST[@]}"}"; do
             [[ "$d" == "$TARGET_DEV" ]] && found=true && break
         done
-        $found || die "$TARGET_DEV is not in the list of external disks"
+        $found || die "$TARGET_DEV is not a valid target disk (must be a non-boot physical disk)"
     fi
 else
     echo "Available disks:"
 
-    DISK_LIST=()
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        # diskutil list external prints lines like: /dev/disk4 (external, physical):
-        if [[ "$line" =~ ^(/dev/disk[0-9]+) ]]; then
-            dev="${BASH_REMATCH[1]}"
-            # Get size from diskutil info
-            size=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Disk Size/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
-            name=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Media Name/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
-            DISK_LIST+=("$dev")
-            printf "  %-14s %-24s %s\n" "$dev" "${size:-unknown}" "${name:-}"
-        fi
-    done < <(diskutil list external 2>/dev/null)
+    if ! $DRY_RUN; then
+        build_disk_list
+    fi
 
     if [[ ${#DISK_LIST[@]} -eq 0 ]]; then
-        die "No external disks found. Insert an SD card and try again."
+        die "No target disks found. Insert an SD card and try again."
     fi
+
+    for dev in "${DISK_LIST[@]}"; do
+        size=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Disk Size/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+        name=$(diskutil info "$dev" 2>/dev/null | awk -F: '/Media Name/{gsub(/^[ \t]+/,"",$2); print $2}' | head -1)
+        printf "  %-14s %-24s %s\n" "$dev" "${size:-unknown}" "${name:-}"
+    done
 
     echo ""
     DEFAULT_DEV="${DISK_LIST[0]}"
@@ -241,7 +257,7 @@ else
     for d in "${DISK_LIST[@]+"${DISK_LIST[@]}"}"; do
         [[ "$d" == "$TARGET_DEV" ]] && found=true && break
     done
-    $found || die "$TARGET_DEV is not in the list of external disks"
+    $found || die "$TARGET_DEV is not in the list of available disks"
 fi
 
 # Use raw device for faster dd
