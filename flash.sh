@@ -406,7 +406,7 @@ apt-get install -y git python3-pip python3-venv python3-dev \
 
 # ── Clone flight-tracker-led ─────────────────────────────────────────────────
 if [[ ! -d /opt/flight-tracker-led ]]; then
-    git clone https://github.com/nolanlawson/flight-tracker-led.git /opt/flight-tracker-led
+    git clone https://github.com/rl-enjoyer/flight-display.git /opt/flight-tracker-led
 fi
 cd /opt/flight-tracker-led
 

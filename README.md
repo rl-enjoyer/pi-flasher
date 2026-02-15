@@ -1,6 +1,6 @@
 # flight-tracker-flasher
 
-Flash a micro SD card with Raspberry Pi OS Lite (Bookworm) pre-configured for the [flight-tracker-led](https://github.com/nolanlawson/flight-tracker-led) project. No monitor, keyboard, or manual setup needed.
+Flash a micro SD card with Raspberry Pi OS Lite (Bookworm) pre-configured for the [flight-display](https://github.com/rl-enjoyer/flight-display) project. No monitor, keyboard, or manual setup needed.
 
 ## Requirements
 
