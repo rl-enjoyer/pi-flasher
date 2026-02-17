@@ -12,12 +12,15 @@ set -euo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-2024-11-19/2024-11-19-raspios-bookworm-armhf-lite.img.xz"
+IMAGE_URL_LITE="https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-2024-11-19/2024-11-19-raspios-bookworm-armhf-lite.img.xz"
+IMAGE_URL_DESKTOP="https://downloads.raspberrypi.com/raspios_armhf/images/raspios_armhf-2024-11-19/2024-11-19-raspios-bookworm-armhf.img.xz"
+IMAGE_URL="$IMAGE_URL_LITE"
 CACHE_DIR="${HOME}/.cache/flight-tracker-flasher"
 BOOT_MOUNT=""
 TARGET_DEV=""
 IMAGE_ARG=""
 DRY_RUN=false
+USE_DESKTOP=false
 WIFI_SSID=""
 WIFI_PASS=""
 LATITUDE=""
@@ -58,6 +61,7 @@ Options:
   --hostname NAME      Pi hostname (default: flight-tracker)
   --username NAME      Pi username (default: pi)
   --password PASS      Pi user password
+  --desktop            Use Pi OS with Desktop instead of Lite (enables HDMI output)
   --device PATH        Target device (e.g. /dev/disk4)
   --yes, -y            Skip the erase confirmation prompt
   --help, -h           Show this help message
@@ -113,6 +117,8 @@ while [[ $# -gt 0 ]]; do
             IMAGE_ARG="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=true; shift ;;
+        --desktop)
+            USE_DESKTOP=true; shift ;;
         --ssid)
             [[ -z "${2:-}" ]] && die "--ssid requires a value"
             WIFI_SSID="$2"; shift 2 ;;
@@ -145,6 +151,12 @@ while [[ $# -gt 0 ]]; do
             die "Unknown option: $1" ;;
     esac
 done
+
+# ── Select OS variant ──────────────────────────────────────────────────────
+
+if $USE_DESKTOP; then
+    IMAGE_URL="$IMAGE_URL_DESKTOP"
+fi
 
 # ── Preflight checks ────────────────────────────────────────────────────────
 
@@ -274,7 +286,13 @@ echo ""
 
 # ── Step 1: Get the image ───────────────────────────────────────────────────
 
-echo "[1/3] Downloading Raspberry Pi OS Lite (Bookworm)..."
+if $USE_DESKTOP; then
+    OS_VARIANT="Desktop"
+else
+    OS_VARIANT="Lite"
+fi
+
+echo "[1/3] Downloading Raspberry Pi OS $OS_VARIANT (Bookworm)..."
 
 if [[ -n "$IMAGE_ARG" ]]; then
     [[ -f "$IMAGE_ARG" ]] || die "Image file not found: $IMAGE_ARG"
@@ -377,6 +395,7 @@ if $DRY_RUN; then
     echo "  [dry-run]   WiFi SSID: $WIFI_SSID"
     echo "  [dry-run]   Latitude: $LATITUDE"
     echo "  [dry-run]   Longitude: $LONGITUDE"
+    echo "  [dry-run]   OS variant: $OS_VARIANT"
     echo "  [dry-run] Would write: /opt/matrix_log.py (LED matrix status logger)"
     echo "  [dry-run]   Status messages at: Matrix OK, Installing deps, Config written, Setup done, Starting tracker"
     echo "  [dry-run] Would modify: $BOOT_MOUNT/cmdline.txt (add firstrun trigger)"
