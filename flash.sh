@@ -377,6 +377,8 @@ if $DRY_RUN; then
     echo "  [dry-run]   WiFi SSID: $WIFI_SSID"
     echo "  [dry-run]   Latitude: $LATITUDE"
     echo "  [dry-run]   Longitude: $LONGITUDE"
+    echo "  [dry-run] Would write: /opt/matrix_log.py (LED matrix status logger)"
+    echo "  [dry-run]   Status messages at: Matrix OK, Installing deps, Config written, Setup done, Starting tracker"
     echo "  [dry-run] Would modify: $BOOT_MOUNT/cmdline.txt (add firstrun trigger)"
     echo ""
     echo "  [dry-run] Would run: diskutil unmount $BOOT_MOUNT"
@@ -498,6 +500,58 @@ if [[ -d lib/rpi-rgb-led-matrix ]]; then
     cd ../..
 fi
 
+# ── Create matrix_log.py for boot status messages ────────────────────────
+cat > /opt/matrix_log.py <<'MATLOG'
+#!/usr/bin/env python3
+"""Display a short status message on the LED matrix and exit."""
+import sys
+sys.path.append("/opt/flight-tracker-led/lib/rpi-rgb-led-matrix/bindings/python")
+from rgbmatrix import RGBMatrix, RGBMatrixOptions
+from PIL import Image, ImageDraw, ImageFont
+
+msg = " ".join(sys.argv[1:]) or "OK"
+
+options = RGBMatrixOptions()
+options.rows = 32
+options.cols = 64
+options.chain_length = 1
+options.hardware_mapping = "adafruit-hat"
+options.gpio_slowdown = 2
+options.brightness = 60
+options.pwm_bits = 7
+options.drop_privileges = False
+
+matrix = RGBMatrix(options=options)
+img = Image.new("RGB", (64, 32), (0, 0, 0))
+draw = ImageDraw.Draw(img)
+
+font_path = "/opt/flight-tracker-led/lib/rpi-rgb-led-matrix/fonts/5x8.bdf"
+try:
+    font = ImageFont.load(font_path)
+except Exception:
+    font = ImageFont.load_default()
+
+# Word-wrap into lines of ~12 chars (64px / 5px per char)
+words, lines, cur = msg.split(), [], ""
+for w in words:
+    test = f"{cur} {w}".strip() if cur else w
+    if len(test) <= 12:
+        cur = test
+    else:
+        if cur: lines.append(cur)
+        cur = w
+if cur: lines.append(cur)
+
+for i, line in enumerate(lines[:4]):
+    draw.text((1, i * 8), line, font=font, fill=(0, 180, 255))
+
+matrix.SetImage(img)
+MATLOG
+chmod +x /opt/matrix_log.py
+
+python3 /opt/matrix_log.py "Matrix OK"
+
+python3 /opt/matrix_log.py "Installing deps..."
 # ── Python dependencies ──────────────────────────────────────────────────────
 pip3 install --break-system-packages -r requirements.txt 2>/dev/null || \
     pip3 install -r requirements.txt
@@ -515,6 +569,8 @@ SETUP_COORDS
 
 cat >> /opt/flight-tracker-setup.sh <<'SETUP_EOF2'
 
+python3 /opt/matrix_log.py "Config written"
+
 # ── Create flight-tracker systemd service ─────────────────────────────────
 cat > /etc/systemd/system/flight-tracker.service <<SVCEOF
 [Unit]
@@ -525,6 +581,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/flight-tracker-led
+ExecStartPre=/usr/bin/python3 /opt/matrix_log.py "Starting tracker..."
 ExecStart=/usr/bin/python3 main.py
 Restart=on-failure
 RestartSec=10
@@ -541,7 +598,9 @@ systemctl enable flight-tracker.service
 systemctl disable flight-tracker-setup.service
 
 echo "=== Flight tracker setup complete at $(date) ==="
+python3 /opt/matrix_log.py "Setup done! Rebooting..."
 echo "=== Rebooting... ==="
+sleep 2
 reboot
 SETUP_EOF2
 
