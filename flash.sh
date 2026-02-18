@@ -599,8 +599,8 @@ SETUP_EOF
 cat >> /opt/flight-tracker-setup.sh <<SETUP_COORDS
 # ── Write config_local.py ─────────────────────────────────────────────────
 cat > /opt/flight-tracker-led/config_local.py <<PYEOF
-LATITUDE = ${CONF_LATITUDE}
-LONGITUDE = ${CONF_LONGITUDE}
+HOME_LAT = ${CONF_LATITUDE}
+HOME_LON = ${CONF_LONGITUDE}
 PYEOF
 SETUP_COORDS
 
