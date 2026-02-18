@@ -519,7 +519,7 @@ done
 apt-get update
 apt-get install -y git python3-pip python3-venv python3-dev \
     libfreetype6-dev libjpeg-dev zlib1g-dev \
-    build-essential
+    build-essential cython3
 
 # ── Clone flight-tracker-led ─────────────────────────────────────────────────
 if [[ ! -d /opt/flight-tracker-led ]]; then
@@ -528,18 +528,21 @@ fi
 cd /opt/flight-tracker-led
 
 # ── Build rpi-rgb-led-matrix ─────────────────────────────────────────────────
-if [[ -d lib/rpi-rgb-led-matrix ]]; then
-    cd lib/rpi-rgb-led-matrix
-    make build-python PYTHON=$(command -v python3)
-    cd ../..
+RGB_MATRIX_DIR="/opt/rpi-rgb-led-matrix"
+if [[ ! -d "$RGB_MATRIX_DIR" ]]; then
+    git clone https://github.com/hzeller/rpi-rgb-led-matrix.git "$RGB_MATRIX_DIR"
 fi
+cd "$RGB_MATRIX_DIR"
+make build-python PYTHON=$(command -v python3)
+make install-python PYTHON=$(command -v python3)
+cd /opt/flight-tracker-led
 
 # ── Create matrix_log.py for boot status messages ────────────────────────
 cat > /opt/matrix_log.py <<'MATLOG'
 #!/usr/bin/env python3
 """Display a short status message on the LED matrix and exit."""
 import sys
-sys.path.append("/opt/flight-tracker-led/lib/rpi-rgb-led-matrix/bindings/python")
+sys.path.append("/opt/rpi-rgb-led-matrix/bindings/python")
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from PIL import Image, ImageDraw, ImageFont
 
@@ -559,7 +562,7 @@ matrix = RGBMatrix(options=options)
 img = Image.new("RGB", (64, 32), (0, 0, 0))
 draw = ImageDraw.Draw(img)
 
-font_path = "/opt/flight-tracker-led/lib/rpi-rgb-led-matrix/fonts/5x8.bdf"
+font_path = "/opt/rpi-rgb-led-matrix/fonts/5x8.bdf"
 try:
     font = ImageFont.load(font_path)
 except Exception:
