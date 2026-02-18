@@ -675,7 +675,7 @@ CMDLINE_FILE="$BOOT_MOUNT/cmdline.txt"
 if [[ -f "$CMDLINE_FILE" ]]; then
     # Remove trailing newline, append on same line
     EXISTING=$(tr -d '\n' < "$CMDLINE_FILE")
-    echo "${EXISTING} systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target" > "$CMDLINE_FILE"
+    echo "${EXISTING} isolcpus=3 systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target" > "$CMDLINE_FILE"
 else
     die "cmdline.txt not found on boot partition"
 fi
