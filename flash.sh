@@ -453,6 +453,15 @@ sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$CONF_HOSTNAME/" /etc/hosts
 ln -sf "/usr/share/zoneinfo/$CONF_TIMEZONE" /etc/localtime
 echo "$CONF_TIMEZONE" > /etc/timezone
 
+# ── Set WiFi regulatory domain ────────────────────────────────────────────────
+# The radio won't transmit without a country code set
+if [ -f /etc/default/crda ]; then
+    sed -i 's/^REGDOMAIN=.*/REGDOMAIN=US/' /etc/default/crda
+else
+    echo 'REGDOMAIN=US' > /etc/default/crda
+fi
+iw reg set US 2>/dev/null || true
+
 # ── Unblock WiFi ─────────────────────────────────────────────────────────────
 rfkill unblock wifi 2>/dev/null || true
 
@@ -482,6 +491,12 @@ method=auto
 NMEOF
 
 chmod 600 "$NM_DIR/wifi.nmconnection"
+
+# ── Restart NetworkManager to pick up the new connection ─────────────────────
+systemctl restart NetworkManager 2>/dev/null || true
+# Give NM a moment, then explicitly bring up the connection
+sleep 2
+nmcli connection up "${CONF_WIFI_SSID}" 2>/dev/null || true
 
 # ── Create the second-stage setup script ─────────────────────────────────────
 cat > /opt/flight-tracker-setup.sh <<'SETUP_EOF'
